@@ -1,7 +1,7 @@
 use std::net::{TcpListener, TcpStream};
 use std::env::args;
 use std::io::{Read, Write};
-use http_server::ThreadPool;
+use multithreading::ThreadPool;
 
 fn main() {
 let address;
@@ -52,7 +52,15 @@ let address;
         address = format!("{}:{}", ip, port);
     }
 
-    let listener = TcpListener::bind(address.as_str()).unwrap();
+    let listener = match TcpListener::bind(address.as_str()) {
+        Ok(listener) => listener,
+        Err(_) => {
+            println!("Error: Could not open port {} due to insufficient permission", address);
+            println!("tip: try running \"sudo setcap cap_net_bind_service=+ep {}\" to add permission or run it as sudo", args().collect::<Vec<String>>()[0]);
+            return;
+        }
+    };
+
     println!("Listening on {}", address);
     println!("Using {} workers", workers);
     let pool = ThreadPool::new(workers);

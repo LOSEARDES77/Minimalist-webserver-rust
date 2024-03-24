@@ -7,9 +7,10 @@ edition = "2021"
 
 [dependencies]
 futures = { version = "0.3.30", features = ["thread-pool"] }
+multithreading = "0.1.1"
 num_cpus = "1.16.0"
 
 [[bin]]
 name = "http-server"
-path = "src/bin/main.rs"
+path = "src/main.rs"
 
