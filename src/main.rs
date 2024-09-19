@@ -4,6 +4,25 @@ use std::env::args;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
+const FILE_EXPLORER_SKELETON: &str = "
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\">
+    <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>File Explorer</title>
+    </head>
+    <body>
+        <h1>File Explorer</h1>
+        <ul>
+            <FILES>
+        </ul>
+        <a href=\"<ONE_DIRECTORY_BACK>\"><button>Back</button></a>
+    </body>
+</html>
+";
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -68,9 +87,8 @@ fn main() {
         });
     }
 }
-
 fn handle_connection(mut stream: TcpStream) {
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 8192];
     let bytes_read = stream.read(&mut buffer).unwrap();
     let buffer = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
 
@@ -87,18 +105,67 @@ fn handle_connection(mut stream: TcpStream) {
     }
     let file = format!("./{}", &file);
     println!("Serving file: {}", file);
-    let file_contents =
-        String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).to_string();
 
-    println!("Request: {}", &buffer);
-    if file_contents.is_empty() {
-        let response = get_response(404, "Not Found", "404 Not Found".to_string());
+    let path = std::path::Path::new(&file);
+    if path.is_dir() {
+        let file_explorer_content = use_file_explorer(&file);
+        let response = get_response(200, "OK", file_explorer_content);
         stream.write_all(response.as_ref()).unwrap();
         stream.flush().unwrap();
         return;
     }
-    let response = get_response(200, "OK", file_contents);
-    stream.write_all(response.as_ref()).unwrap();
+
+    let file_contents = std::fs::read(&file);
+
+    println!("Request: {}", &buffer);
+    match file_contents {
+        Ok(contents) => {
+            let content_type = get_content_type(&file);
+            let response = get_response_with_content_type(200, "OK", contents, &content_type);
+            stream.write_all(response.as_ref()).unwrap();
+        }
+        Err(_) => {
+            let file_explorer_content = use_file_explorer(".");
+            let response = get_response(200, "OK", file_explorer_content);
+            stream.write_all(response.as_ref()).unwrap();
+        }
+    }
+    stream.flush().unwrap();
+}
+
+fn get_content_type(file: &str) -> String {
+    let extension = std::path::Path::new(file)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("");
+
+    match extension {
+        "html" | "htm" => "text/html".to_string(),
+        "css" => "text/css".to_string(),
+        "js" => "application/javascript".to_string(),
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "gif" => "image/gif".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+fn get_response_with_content_type(
+    code: u16,
+    status_line_message: &str,
+    message: Vec<u8>,
+    content_type: &str,
+) -> Vec<u8> {
+    let headers = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+        code,
+        status_line_message,
+        content_type,
+        message.len()
+    );
+    let mut response = headers.into_bytes();
+    response.extend_from_slice(&message);
+    response
 }
 
 fn parse_file(file: &str) -> String {
@@ -122,5 +189,29 @@ fn get_response(code: u16, status_line_message: &str, message: String) -> String
         status_line_message,
         message.len(),
         &message
+    )
+}
+
+fn use_file_explorer(address: &str) -> String {
+    let path = std::path::Path::new(address);
+    let mut files = String::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name().unwrap().to_string_lossy();
+            let relative_path = path.strip_prefix(".").unwrap_or(&path);
+            files.push_str(&format!(
+                "<li><a href=\"{}\">{}</a></li>\n",
+                relative_path.display(),
+                file_name
+            ));
+        }
+    }
+
+    let one_directory_back = path.parent().unwrap_or(path);
+
+    FILE_EXPLORER_SKELETON.replace("<FILES>", &files).replace(
+        "<ONE_DIRECTORY_BACK>",
+        one_directory_back.display().to_string().as_str(),
     )
 }
