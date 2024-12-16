@@ -1,7 +1,7 @@
 use clap::Parser;
 use multithreading::ThreadPool;
 use std::env::args;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 const FILE_EXPLORER_SKELETON: &str = "
@@ -23,7 +23,7 @@ const FILE_EXPLORER_SKELETON: &str = "
 </html>
 ";
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Name of the person to greet
@@ -31,11 +31,14 @@ struct Args {
     address: String,
 
     /// Number of times to greet
-    #[arg(short, long, default_value_t = 8080)]
+    #[arg(short, long, default_value_t = 80)]
     port: u16,
 
     #[arg(short, long, default_value_t = num_cpus::get() / 2)]
     workers: usize,
+
+    #[arg(short, long, default_value_t = String::from("index.html"))]
+    index_file_name: String,
 }
 
 fn get_ip_address() -> String {
@@ -45,35 +48,43 @@ fn get_ip_address() -> String {
         "0.0.0.0".parse().unwrap()
     }
 }
-fn main() {
-    let parsed_args = Args::parse();
 
-    let address = format!("{}:{}", parsed_args.address, parsed_args.port);
-
-    let workers = parsed_args.workers;
-
-    let listener = match TcpListener::bind(address.as_str()) {
-        Ok(listener) => listener,
+fn create_listener(host: &str, port: u16) -> Option<(TcpListener, u16)> {
+    match TcpListener::bind(format!("{}:{}", host, port)) {
+        Ok(listener) => return Some((listener, port)),
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
+            if e.kind() == ErrorKind::AddrInUse {
+                println!("Port {} in use, trying {}", port, port + 1);
+                return create_listener(host, 1 + port);
+            } else if e.kind() == ErrorKind::PermissionDenied {
                 println!(
                     "{}\nError: Could not open port {} due to insufficient permission",
-                    parsed_args.port, e
+                    port, e
                 );
                 #[cfg(target_os = "linux")]
                 println!("tip: try running \"sudo setcap cap_net_bind_service=+ep {}\" to add permission or run it as sudo", args().collect::<Vec<String>>()[0]);
-            } else {
-                println!("Error: {}", e);
             }
-            panic!();
+        }
+    };
+    None
+}
+fn main() {
+    let parsed_args = Args::parse();
+    let workers = parsed_args.workers;
+
+    let listener = match create_listener(&parsed_args.address, parsed_args.port) {
+        Some(listener) => listener,
+        None => {
+            println!("Error creating tcp listener");
+            return;
         }
     };
 
-    println!("Listening on {}", address);
+    println!("Listening on {}:{}", &parsed_args.address, listener.1);
     println!("Using {} workers", workers);
     let pool = ThreadPool::new(workers);
 
-    for stream in listener.incoming() {
+    for stream in listener.0.incoming() {
         let stream = stream.unwrap();
         let address = &stream.peer_addr().unwrap();
         println!(
@@ -82,12 +93,13 @@ fn main() {
             address.port()
         );
 
+        let args_clone = parsed_args.clone();
         pool.execute(|| {
-            handle_connection(stream);
+            handle_connection(stream, args_clone);
         });
     }
 }
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, parser_args: Args) {
     let mut buffer = [0; 8192];
     let bytes_read = stream.read(&mut buffer).unwrap();
     let buffer = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
@@ -96,7 +108,7 @@ fn handle_connection(mut stream: TcpStream) {
         return;
     }
     let file = buffer.split_whitespace().nth(1).unwrap_or_default();
-    let file = parse_file(file);
+    let file = parse_file(file, parser_args.index_file_name);
     if file == "error_path_in_reverse" {
         let response = get_response(403, "Forbidden", "403 Forbidden".to_string());
         stream.write_all(response.as_ref()).unwrap();
@@ -168,13 +180,13 @@ fn get_response_with_content_type(
     response
 }
 
-fn parse_file(file: &str) -> String {
+fn parse_file(file: &str, index_file_name: String) -> String {
     let mut file = file.to_string();
     if file.contains("../") {
         return "error_path_in_reverse".to_string();
     }
     if file.ends_with("/") {
-        file = format!("{}index.html", file);
+        file = format!("{}{}", file, index_file_name);
     }
     if file.starts_with("/") {
         file = file[1..].parse().unwrap();
